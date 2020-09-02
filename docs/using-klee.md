@@ -104,13 +104,19 @@ configure the `verification-annotations` crate correctly.
 export RUSTFLAGS="--cfg=verify $RUSTFLAGS"
 ```
 
-If you get an error message about `-lkleeRuntest`) you may have to point
-the linker at the directory where the KLEE library was installed.
-For example, on OSX you might have installed it in `$HOME/homebrew/lib`
-and need to use this command
+Our goal is to find bugs so we turn on some additional error checking
+in the compiled code to detect arithmetic overflows.
 
 ```
-export RUSTFLAGS="-L$HOME/homebrew/lib -C link-args=-Wl,-rpath,$HOME/homebrew/lib $RUSTFLAGS"
+export RUSTFLAGS="-Warithmetic-overflow -Coverflow-checks=yes $RUSTFLAGS"
+```
+
+And, when we find a bug, we want to report it as efficiently as
+possible so we make sure that the program will abort if it panics.
+
+
+```
+export RUSTFLAGS="-Zpanic_abort_tests -Cpanic=abort $RUSTFLAGS"
 ```
 
 With all those definitions, we can now run
@@ -125,10 +131,62 @@ a name like `target/debug/deps/try_klee-6136b0f50ac42b91.bc` (Linux).
 At least for simple cases, we can refer to both files as
 `target/debug/deps/try_klee*.bc` and not worry about the exact filename.
 
+The above should have worked. But, if it produced a linking error involving
+`-lkleeRuntest` you may have to point the linker at the directory where the KLEE
+library was installed.  For example, on OSX you might have installed it in
+`$HOME/homebrew/lib` and need to use this command
+
+```
+export RUSTFLAGS="-L$HOME/homebrew/lib -C link-args=-Wl,-rpath,$HOME/homebrew/lib $RUSTFLAGS"
+```
+
+
+### Campiling large programs
+
+Finally, on larger, more complex projects than this example, we have seen
+problems with the Rust compiler generating SSE instructions that KLEE does not
+support.
+We don't have a complete solution for this but we have found that it helps
+to compile with a low (but non-zero) level of optimization, to disable
+more sophisticated optimizations and to disable SSE and AVX features.
+
+```
+RUSTFLAGS="-Copt-level=1 $RUSTFLAGS"
+RUSTFLAGS="-Cno-vectorize-loops -Cno-vectorize-slp $RUSTFLAGS"
+RUSTFLAGS="-Ctarget-feature=-mmx,-sse,-sse2,-sse3,-ssse3,-sse4.1,-sse4.2,-3dnow,-3dnowa,-avx,-avx2 $RUSTFLAGS"
+```
+
+(This is not needed for our simple example.)
+
+
+### Working round the "proc_macros" problem
+
+We have seen problems with large applications that use `proc_macros`
+that prevented the final bitcode file from being produced.
+The (incredibly obscure) workaround for this is to specify a target
+explicitly. (Don't even ask why this helps - just remember it in case you hit
+problems.)
+
+The first step is to figure out what target you are currently using.
+You want the "default host" reported by "rustup show"
+
+```
+$ rustup show | grep Default
+Default host: x86_64-unknown-linux-gnu
+```
+
+Now that we know the target, we add `--target` to the `cargo build` command
+
+```
+cargo build --features=verifier-klee --target=x86_64-unknown-linux-gnu
+```
+
+(This is also not needed for our simple example.)
+
 
 ## Running KLEE
 
-Having build a bitcode file containing the program and all the libraries that
+Having built a bitcode file containing the program and all the libraries that
 it depends on, we can now run KLEE like this:
 
 ```
@@ -209,3 +267,34 @@ Test values: a = 1, b = 1
 
 This provides an easier way to view the test values chosen: using Rust's
 builtin print function.
+
+
+### Making KLEE more effective
+
+In the above, we used this command to invoke KLEE
+
+```
+klee --output-dir=kleeout --warnings-only-to-file target/debug/deps/try_klee*.bc
+```
+
+Some additional flags that are worth using for larger examples are
+
+- `--exit-on-error` causes KLEE to exit as soon as it finds a problem.
+  (KLEE's default mode is to keep searching for more problems.)
+
+- `--libc=klee` get's KLEE to use a simple, cut-down C library when analyzing
+  the program
+
+- `--silent-klee-assume` avoids KLEE reporting errors as a result of the way
+  that we use the `verifier::reject()` and `verifier::assume()` functions.
+
+- `--disable-verify` works around a problem in KLEE 
+  caused by [an interaction between debug information and inlining](https://github.com/klee/klee/issues/937).
+
+These flags are all added _before_ the bitcode file like this
+
+```
+klee --output-dir=kleeout --warnings-only-to-file --exit-on-error \
+     --libc=klee --silent-klee-assume --disable-verify \
+     target/debug/deps/try_klee*.bc
+```
